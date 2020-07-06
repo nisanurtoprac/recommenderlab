@@ -1,0 +1,925 @@
+---
+title: "Film Oneri Sistemleri"
+author: "Grup 8"
+output: 
+  html_document:
+    toc: true           
+    toc_depth: 2
+    df_print: paged
+    theme: lumen
+---
+
+**Serenay Akciyer 121516030**
+
+**Nisanur Topraç 121516026**
+
+##Projeye Genel Bakis
+
+Bu projede, film onermek icin ortak bir filtreleme tavsiye (CFR) sistemi gelistirmek amaslanmistir.
+
+CFR sistemlerinin temel fikri, eger iki kullanici gecmiste ayni ilgi alanlarini paylasiyorsa,(ornegin ayni kitabi veya ayni filmi sevdiler) gelecekte de benzer zevklere sahip olacaklardir. Ornegin, A kullanicisi ve B kullanicisi benzer bir kitap satin alma gecmisine sahipse ve A kullanicisi yakin zamanda B kullanicisinin henuz gormedigi bir kitap satin aldiysa, temel fikir bu kitabi B kullanicisina onermektir.
+
+Bu projede, film onermek icin herkese acik bir film derecelendirme veri kumesinden filmlere yonelik cok sayida kullanici tercihi iceren veri seti kullanilmistir.
+
+##Kullanilan Kutuphaneler
+
+Bu projede asagidaki kutuphaneler kullanilmistir:
+
+* **recommenderlab:** Tavsiye Algoritmalarini gelistirme ve test etme kutuphanesidir.
+
+* **ggplot2:** Gorsellestirme ve grafiklerin cizimi.
+
+* **data.table:** Buyuk verilerin hizli bir sekilde toplanmasi,hizli sirali birlestirmeler,gruplara sutun ekleme,karakterlerle ayrilmis deger okuma yazma vb. islevler icin kullanilan kutuphanedir. 
+
+* **reshape2:** Genis ve uzun formatlar arasinda veri donusturmeyi kolaylastiran pakettir.
+
+
+```{r libs, warning=FALSE, error=FALSE, message=FALSE}
+library(recommenderlab) 
+library(ggplot2)
+library(data.table)
+library(reshape2)
+```
+
+##Veri Kumesi
+
+Kullanilan veri seti grouplens.org'tadir ve http://grouplens.org/datasets/movielens/latest adresinde herkese aciktir. Bu veriler 03 Nisan 1996 ve 09 Ocak 2016 arasinda 668 kullanici tarafindan olusturuldu. Veri kumesi ise 11 Ocak 2016'da olusturulmustur.
+
+
+```{r data_load,message=FALSE,warning=FALSE}
+movies <- read.csv("movies.csv",stringsAsFactors=FALSE)
+ratings <- read.csv("ratings.csv")
+```
+
+*movies* icerigi, verinin ilk birkac satiri ile birlikte asagida verilmistir:
+
+```{r mov_summ,message=FALSE,warning=FALSE}
+summary(movies)
+head(movies)
+```
+
+*ratings* icerigi, verinin ilk birkac satiri ile birlikte asagida verilmistir:
+
+```{r rat_summ,message=FALSE,warning=FALSE}
+summary(ratings)
+head(ratings)
+```
+
+##Veri On Isleme
+
+Ilk once film turlerinin bilgileri, gelecekteki kullanicilarin belirli turlerde sevdikleri filmleri aramasina izin verilecek sekilde yeniden duzenlenir. 
+
+##Tur Listesi Cikarma
+
+Her film icin karsilik gelen turlerin bir matrisi olusturulur.
+
+```{r data_genres,message=FALSE,warning=FALSE}
+genres <- as.data.frame(movies$genres, stringsAsFactors=FALSE)
+
+genres2 <- as.data.frame(tstrsplit(genres[,1], '[|]', 
+                                   type.convert=TRUE), 
+                         stringsAsFactors=FALSE)
+colnames(genres2) <- c(1:10)
+
+genre_list <- c("Action", "Adventure", "Animation", "Children", 
+                "Comedy", "Crime","Documentary", "Drama", "Fantasy",
+                "Film-Noir", "Horror", "Musical", "Mystery","Romance",
+                "Sci-Fi", "Thriller", "War", "Western") # 18 tane film turu vardir
+
+genre_matrix <- matrix(0,10330,18) #bos matris, 10330= film sayisi +1, 18= tur sayisi
+genre_matrix[1,] <- genre_list # ilk satiri tur listesine ayarla
+colnames(genre_matrix) <- genre_list #tur listesine sutun adlarini ayarlama
+
+# matris araciligiyla yineleme
+
+for (i in 1:nrow(genres2)) {
+  for (c in 1:ncol(genres2)) {
+    genmat_col = which(genre_matrix[1,] == genres2[i,c])
+    genre_matrix[i+1,genmat_col] <- 1
+  }
+}
+
+# veri tablosuna donusturmek
+genre_matrix2 <- as.data.frame(genre_matrix[-1,], stringsAsFactors=FALSE) #tur listesi olan ilk satiri kaldirmak
+for (c in 1:ncol(genre_matrix2)) {
+  genre_matrix2[,c] <- as.integer(genre_matrix2[,c])  #karakterlerden tam sayilara donusturme
+} 
+
+head(genre_matrix2)
+```
+
+##Bir Ture Gore Film Aramak Icin Matris Olusturmak
+
+Bir filmin turune gore kolayca aranmasini saglayacak *search matrix* olusturulur.
+
+```{r search_genres,message=FALSE,warning=FALSE}
+search_matrix <- cbind(movies[,1:2], genre_matrix2)
+head(search_matrix)
+```
+
+Her filmin bir veya birden fazla ture karsilik geldigi gorulur.
+
+##Derecelendirme Matrisini Uygun Bicimde Donusturme
+
+*Recommenderlab* ile bir oneri motoru olusturmak ve derecelendirme verilerini kullanmak icin, derecelendirme matrisi *realRatingMatrix* turundeki tavsiye edici seyrek matrise donusturulur.
+
+```{r rat_mat,message=FALSE,warning=FALSE}
+#Derecelendirme matrisi. Satirlar = userId, Sutunlar = movieId
+ratingmat <- dcast(ratings, userId~movieId, value.var = "rating", na.rm=FALSE)
+ratingmat <- as.matrix(ratingmat[,-1]) # userIds kaldirmak
+
+#Derecelendirme matrisini tavsiye edici bir seyrek matrise donusturme
+ratingmat <- as(ratingmat, "realRatingMatrix")
+ratingmat
+```
+
+##Oneri Modellerinin Parametreleri
+
+*Recommenderlab* paketi, oneri algoritmasi icin bazi secenekler icerir:
+
+```{r rec_overview,message=FALSE,warning=FALSE}
+recommender_models <- recommenderRegistry$get_entries(dataType = "realRatingMatrix")
+names(recommender_models)
+lapply(recommender_models, "[[", "description")
+```
+
+**HYBRID_realRatingMatrix :** Agirlikli ortalamalar kullanarak cesitli oneri stratejilerini toplayan hibrit tavsiye.
+
+**ALS_realRatingMatrix :** Alternatif en kucuk kareler algoritmasi ile hesaplanan gizli faktorlere dayali acik derecelendirmeler icin oneri.
+
+**ALS_implicit_realRatingMatrix :** Degisken en kucuk kareler algoritmasi ile hesaplanan gizli faktorlere dayali ortuk veriler icin tavsiye.
+
+**IBCF_realRatingMatrix :** Ogeye baglı ortak calismaya dayali filtrelemeye yontemi.
+
+**LIBMF_realRatingMatrix :** Paket recosystem uzerinden LIBMF ile matris carpanlarina ayirma 
+
+**POPULAR_realRatingMatrix :** Tavsiye oge populerligine gore.
+
+**RANDOM_realRatingMatrix :** Rastgele oneriler uretin (gercek derecelendirmeler).
+
+**RERECOMMEND_realRatingMatrix :** Yuksek puan alan ogeleri (gercek puanlar) yeniden onerir.
+
+**SVD_realRatingMatrix :** Sutun ortalama gosterimiyle SVD yaklasimina dayanan oneri.
+
+**SVDF_realRatingMatrix :** Degrade inisli Funk SVD'yi temel alan oneri.
+
+**UBCF_realRatingMatrix :** Kullanici tabanli ortak calismaya dayali filtreleme onerisi.
+
+Bu projede IBCF_realRatingMatrix ve UBCF_realRatingMatrix kullanilacaktir. Bu iki modelin parametreleri kontrol edilir.
+
+```{r model_param,message=FALSE,warning=FALSE}
+recommender_models$IBCF_realRatingMatrix$parameters
+recommender_models$UBCF_realRatingMatrix$parameters
+```
+
+##Benzerlik Verilerini Kesfetme
+
+Isbirlikci filtreleme algoritmalari, kullanicilar veya ogeler arasindaki benzerligin olculmesine dayanir. Bu amacla, *recommenderlab* benzerlik fonksiyonu icerir. Benzerlikleri hesaplamak icin desteklenen yontemler *cosine, pearson* ve *jaccard*'dir.
+
+*cosine* yani kosinus mesafesi kullanilarak benzerlik matrisi olusturulmustur. Daha sonra bu matris gorsellestirilerek ilk 4 kullanicinin birbirine ne kadar benzedigi belirlenmistir.
+
+```{r sim_users,message=FALSE,warning=FALSE}
+similarity_users <- similarity(ratingmat[1:4, ], 
+                               method = "cosine", 
+                               which = "users")
+as.matrix(similarity_users)
+image(as.matrix(similarity_users), main = "Kullanici Benzerligi")
+```
+
+Verilen matriste, her satir ve her sutun bir kullaniciya karsilik gelir ve her hucre iki kullanici arasindaki benzerlige karsilik gelir. Hucre ne kadar kirmizi olursa, iki kullanici da o kadar benzerdir. 
+
+Ayni yaklasim kullanilarak ilk dort film arasindaki benzerlik hesaplanir.
+
+```{r sim_movies,message=FALSE,warning=FALSE}
+similarity_items <- similarity(ratingmat[, 1:4], method =
+                                 "cosine", which = "items")
+as.matrix(similarity_items)
+image(as.matrix(similarity_items), main = "Film Benzerligi")
+```
+
+##Derecelendirme Degerleri Arastirilir
+
+```{r rate_values,message=FALSE,warning=FALSE}
+vector_ratings <- as.vector(ratingmat@data)
+unique(vector_ratings) #benzersiz derecelendirme degerleri nelerdir
+
+table_ratings <- table(vector_ratings) #her bir derecelendirme degerinin sayisi
+table_ratings
+```
+
+11 benzersiz puan degeri vardir. Daha dusuk degerler daha dusuk derecelendirmeler anlamina gelir veya bunun tersi de gecerlidir.
+
+##Puanlarin Dagilimi
+
+Veri setinin icerisindeki belgelere gore, 0'a esit bir derecelendirme eksik bir degeri temsil eder, bu yuzden sonuclari gorsellestirmeden once bu degerler veri kumesinden kaldirilir.
+
+```{r rat_distrib,message=FALSE,warning=FALSE}
+vector_ratings <- vector_ratings[vector_ratings != 0] # rating == 0 lar NA değerleridir.
+vector_ratings <- factor(vector_ratings)
+
+qplot(vector_ratings) + 
+  ggtitle("Derecelendirme Dagilimi")
+```
+
+Goruldugu uzere, filmlerin cogu 3 veya daha yuksek bir puanla derecelendiriliyor. En yaygin derecelendirme degeri ise  4'tur. 
+
+##En Iyi Filmlerin Goruntulenme Sayisi
+
+
+```{r top_no,message=FALSE,warning=FALSE}
+views_per_movie <- colCounts(ratingmat) # her film icin goruntuleme sayisi
+
+table_views <- data.frame(movie = names(views_per_movie),
+                          views = views_per_movie) # gorunumler icin tablo olustur
+table_views <- table_views[order(table_views$views, 
+                                 decreasing = TRUE), ] # goruntuleme sayisina gore sirala
+table_views$title <- NA
+for (i in 1:10325){
+  table_views[i,3] <- as.character(subset(movies, 
+                                         movies$movieId == table_views[i,1])$title)
+}
+
+table_views[1:6,]
+
+ggplot(table_views[1:6, ], aes(x = title, y = views)) +
+  geom_bar(stat="identity") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+ggtitle("En iyi Filmlerin Goruntulenme Sayisi")
+```
+
+En cok izlenen filmin *Pulp Fiction(1994)* oldugu gorulmustur. 
+
+##Ortalama Film Derecelendirmesinin Dagilimi
+
+Her bir filmin ortalama derecelendirmeleri hesaplanarak en yuksek puan alan filmler tanimlanir.
+
+```{r avg_rat,message=FALSE,warning=FALSE}
+average_ratings <- colMeans(ratingmat)
+
+qplot(average_ratings) + 
+  stat_bin(binwidth = 0.1) +
+  ggtitle("Ortalama Film Derecelendirmesinin Dagilimi")
+
+average_ratings_relevant <- average_ratings[views_per_movie > 50] 
+qplot(average_ratings_relevant) + 
+  stat_bin(binwidth = 0.1) +
+  ggtitle(paste("Ortalama Derecelendirme Dagilimi"))
+```
+
+Ilk tablo ortalama film derecelendirmesinin dagilimini gostermektedir. En yuksek deger 3 civarindadir ve derecesi 1 veya 5 olan birkac film vardir. Bu durum, bu filmlerin sadece bir kac kisiden 1 veya 5 derece almasiyla aciklanabilir.
+
+Bu durumu ortadan kaldirmak ve daha guvenilir sonuclar elde etmek amaciyla goruntuleme sayisi 50'nin altinda olan filmler kaldirildi.
+
+Ikinci tabloda tum siralamalar 2.16 ve 4.45 arasindadir. Yapilan islem sonucu uc noktalar degismistir. En yuksek deger 4 olmustur.
+
+##Derecelendirme Matrisinin Isi Haritasi
+
+Renkleri derecelendirmeleri temsil eden bir isi haritasi olusturulur ve tum derecelendirme matrisi gorsellestirilir. Matrisin her satiri bir kullaniciya, her bir sutun bir filme ve her bir hucre derecelendirmesine karsilik gelir.
+
+```{r heat_rate,message=FALSE,warning=FALSE}
+  image(ratingmat, main = "Derecelendirme Matrisinin Isi Haritasi") # okunmasi zor ve cok fazla boyut
+
+image(ratingmat[1:20, 1:25], main = "Ilk 20 Satir ve 25 Sutunun Isi Haritasi")
+```
+
+Cok fazla kullanici ve oge oldugu icin ilk grafigin okunmasi zor olmustur. Ikinci grafik ilk 20 satir ve 25 sutundan olusturulmustur.
+
+Bazi kullanicilar digerlerinden daha fazla film izlemistir. Bu nedenle, bazi rastgele kullanicilar ve ogeler goruntulenmek yerine, en alakali kullanicilar ve ogeler secmelidir. Bu yuzden sadece bircok film izleyen kullanicilar ve bircok kullanici tarafindan izlenen filmler gorsellestirilir.
+
+En alakali kullanicilari ve filmleri tanimlamak ve secmek icin asagidaki adimlar izlenir:
+
+1. Kullanici basina minimum film sayisi belirlenir.
+2. Film basina minimum kullanici sayisi belirlenir.
+3. Bu olcutlere uyan kullanicilar ve filmler secilir.
+
+```{r heat_relev,message=FALSE,warning=FALSE}
+min_n_movies <- quantile(rowCounts(ratingmat), 0.99)
+min_n_users <- quantile(colCounts(ratingmat), 0.99)
+print("Kullanici basina minimum film sayisi:")
+min_n_movies
+print("Film basina minimum kullanici sayisi:")
+min_n_users
+
+image(ratingmat[rowCounts(ratingmat) > min_n_movies,
+                 colCounts(ratingmat) > min_n_users], 
+main = "En Iyi Kullanicilarin ve Filmlerin Isi Haritasi")
+```
+
+Daha fazla film izleyen kullanicilar dikkate alinir. Bircok kullanici en iyi filmleri izlemistir. Isi haritasinin bazi sutunlari digerlerinden daha koyudur yani bu sutunlar en yuksek dereceli filmleri temsil eder, daha koyu satirlar ise daha yuksek derecelendirme yapan kullanicilari temsil eder.
+
+##Veri Hazirlama
+
+Dogru sonuc alabilmek icin en alakali veriler secilmelidir. En alakali verilerin secilmesi icin, derecelendirilen film basina minimum kullanici sayisi 50 ve film basina minimum goruntuleme sayisi 50 olarak tanimlanir
+
+```{r rel_data,message=FALSE,warning=FALSE}
+ratings_movies <- ratingmat[rowCounts(ratingmat) > 50,
+                             colCounts(ratingmat) > 50]
+ratings_movies
+
+```
+
+En alakali veriler, toplam veri kumesine (668 kullaniciya ve 10325 film) kiyasla 420 kullanici ve 447 film icerir.
+
+En alakali veriler kumesinde bulunan kullanicilarin ve filmlerin ilk yuzde 2'si gorsellestirilir.
+
+```{r rel_explore,message=FALSE,warning=FALSE}
+min_movies <- quantile(rowCounts(ratings_movies), 0.98)
+min_users <- quantile(colCounts(ratings_movies), 0.98)
+image(ratings_movies[rowCounts(ratings_movies) > min_movies,
+                     colCounts(ratings_movies) > min_users], 
+main = "En Iyi Kullanicilarin ve Filmlerin Isi Haritasi")
+
+average_ratings_per_user <- rowMeans(ratings_movies)
+qplot(average_ratings_per_user) + stat_bin(binwidth = 0.1) +
+  ggtitle("Kullanici Basina Ortalama Derecelendirmenin Dagilimi")
+```
+
+Isi haritasinda bazi satirlar digerlerinden daha koyudur. Bu, bazi kullanicilarin tum filmlere daha yuksek puan vermesi anlamina gelebilir. Ikinci grafikte ise goruldugu uzere, kullanici basina ortalama derecelendirmenin tum kullanicilar arasinda dagilimi cok degiskendir.
+
+##Veriyi Normallestirme
+
+Tum filmlere yuksek puan veren kullanicilar sonuclarin yaniltici olmasina sebep olabilir. Bu durumun ortadan kalkmasi icin her kullanicinin ortalama puani 0 olacak sekilde normallestirme yapilir.
+
+```{r normal_data,message=FALSE,warning=FALSE}
+ratings_movies_norm <- normalize(ratings_movies)
+sum(rowMeans(ratings_movies_norm) > 0.00001)
+```
+
+En iyi filmler icin normallestirilmis matris gorsellestirilir. Veriler surekli oldugu icin gorsel renklenmistir.
+
+```{r viz_normal_data,message=FALSE,warning=FALSE}
+image(ratings_movies_norm[rowCounts(ratings_movies_norm) > min_movies,
+                          colCounts(ratings_movies_norm) > min_users], 
+main = "En Iyi Kullanicilarin ve Filmlerin Isi Haritasi")
+```
+
+##Verileri Ikileme
+
+Bazi oneri modelleri ikili veriler uzerinde calisir, bu nedenle verileri ikililestirmek, yani yalnizca 0 ve 1 iceren bir tablo tanimlamak yararli olabilir. 0'lar eksik degerler veya kotu derecelendirme olarak degerlendirilir.
+
+Bu projede ikililestirme ile ilgili iki farkli durum incelenir:
+
+1. Kullanici filme oy verdiginde 1, aksi halde 0 olan bir matris tanimlanir ve derecelendirmeyle ilgili bilgiler kaybolur. Bu islemle film izleyip oy veren ve oy vermeyen kullanici gorulur.
+
+2. Derecesi belirli bir esigin (ornegin 3) uzerinde veya ona esitse 1 ve aksi durumda 0 olan bir matris tanimlanir. Bu durumda, bir filme kotu bir derecelendirme vermek ve filmin derecelendirilmemesi(izlenmemis veya izlenipde derecelendirme yapilmamis) esdeger olur.
+
+Her iki durum incelenir ve %5'lik kismi gorsellestirilir.
+
+**1. Secenek**
+
+```{r binar_data1,message=FALSE,warning=FALSE}
+ratings_movies_watched <- binarize(ratings_movies, minRating = 1)
+min_movies_binary <- quantile(rowCounts(ratings_movies), 0.95)
+min_users_binary <- quantile(colCounts(ratings_movies), 0.95)
+image(ratings_movies_watched[rowCounts(ratings_movies) > min_movies_binary,
+                             colCounts(ratings_movies) > min_users_binary], 
+main = "En Iyi kullanicilarin ve Filmlerin Isi Haritasi")
+```
+
+**2. Secenek**
+
+```{r binar_data2,message=FALSE,warning=FALSE}
+ratings_movies_good <- binarize(ratings_movies, minRating = 3)
+image(ratings_movies_good[rowCounts(ratings_movies) > min_movies_binary, 
+colCounts(ratings_movies) > min_users_binary], 
+main = "En Iyi kullanicilarin ve Filmlerin Isi Haritasi")
+```
+
+Ikinci isi haritasinda daha fazla beyaz hucre vardir, bu durum kullanicilar tarafindan izlenmeyen veya derecelendirilmeyen filmlerin daha fazla veya kotu derecelendirme yani belirledigimiz esigin (3) altinda derecelendirmeye sahip filmler oldugunu gosteriyor.
+
+##IBCF Tabanli Isbirlikci Filtreleme Modeli
+
+Isbirlikci filtreleme, farkli kullanicilar hakkindaki bilgileri dikkate alan bir tavsiye dalidir. "Isbirlikci" kelimesi, kullanicilarin ogeleri onermek icin birbirleriyle isbirligi yaptigi anlamina gelir. Aslinda, algoritmalar kullanici derecelendirmelerini ve tercihlerini dikkate alir.
+
+
+##Train ve Test Setleri
+
+Model, veri kumesinin % 80'ini train seti ve % 20'sini test seti olarak olusturulur. 
+
+```{r train_test_sets,message=FALSE,warning=FALSE}
+which_train <- sample(x = c(TRUE, FALSE), 
+                      size = nrow(ratings_movies),
+                      replace = TRUE, 
+                      prob = c(0.8, 0.2))
+
+
+recc_data_train <- ratings_movies[which_train, ]
+recc_data_test <- ratings_movies[!which_train, ]
+dim(recc_data_train )
+dim(recc_data_test)
+```
+
+##Oneri Modeli Olusturma
+
+Bu modeldeki parametreler incelenir.Burada *k*, ilk adimda aralarindaki benzerliklerin hesaplanacagi islem sayisidir. Her oge icin, algoritma en cok benzer *k* ogelerini tanimlar ve numarayi saklar.*method*, varsayilan olarak *cosine* olan bir benzerlik islevidir (*pearson * olabilir). method = Cosine ve k=30 olan bir model olusturulur.
+
+```{r build_recommenderIBCF,message=FALSE,warning=FALSE}
+recommender_models <- recommenderRegistry$get_entries(dataType ="realRatingMatrix")
+recommender_models$IBCF_realRatingMatrix$parameters
+
+recc_model <- Recommender(data = recc_data_train, 
+                          method = "IBCF",
+                          parameter = list(k = 30))
+
+recc_model
+class(recc_model)
+```
+
+Tavsiye modeli:
+
+```{r explore_IBCF,message=FALSE,warning=FALSE}
+model_details <- getModel(recc_model)
+
+class(model_details$sim) #  benzerlik matrisi icerir
+dim(model_details$sim)
+
+n_items_top <- 20
+image(model_details$sim[1:n_items_top, 1:n_items_top],
+      main = "Ilk 20 satir ve 20 Sutunlarin Isi Haritasi")
+
+
+```
+
+*dgCMatrix* model tarafindan olusturulan bir benzerlik matrisidir. Boyutlari, oge sayisina esittir (447 x 447). Ilk 20 ogenin isi haritasi, bircok degerin 0'a esit oldugunu gosterir. Bunun nedeni, her satirin yalnizca 0'dan buyuk k (30) ogeleri icermesidir. Her sutun icin null olmayan ogelerin sayisi, karsilik gelen film, baska bir filmin ust k bolumune dahil edilmistir. Bu nedenle matris simetrik degildir.
+
+```{r,message=FALSE,warning=FALSE}
+col_sums <- colSums(model_details$sim > 0)
+qplot(col_sums) + stat_bin(binwidth = 1) + ggtitle("Sutun Sayisinin Dagilimi")
+```
+
+Eleman sayisinin sutuna gore dagilim grafigi, digerlerine benzer birkac film oldugunu gosterir.
+
+##Veri Kumesine Oneri Sistemi Uygulama
+
+Test setindeki kullanicilara film onermek mumkun hale gelmistir, *n_recommended *, her kullaniciya onerilecek film sayisini belirten 10'a esitlenir.
+
+Her kullanici icin, algoritma derecelendirilmis filmlerini cikarir. Her film icin, benzerlik matrisinden baslayarak tum benzer ogeleri tanimlar. Ardindan, algoritma her bir benzer ogeyi su sekilde siralar:
+
+* Secilen filmle iliskili her izleme isleminin kullanici puanini cikarin. Derecelendirme agirlik olarak kullanilir. 
+* Secilen filmle iliskili her izleme ile ogenin benzerligini ayiklayin.
+* Her agirligi ilgili benzerlikle carpin.
+* Her seyi topla.
+
+Ardindan, algoritma ilk 10 tavsiyeyi tanimlar:
+
+```{r apply_IBCF,message=FALSE,warning=FALSE}
+n_recommended <- 10 # her kullaniciya onerilecek oge sayisi
+
+recc_predicted <- predict(object = recc_model, 
+                          newdata = recc_data_test, 
+                          n = n_recommended)
+recc_predicted
+```
+
+Ilk kullanici icin onerilerin sonuclarini incelenir:
+
+```{r explore_res_IBCF,message=FALSE,warning=FALSE}
+recc_user_1 <- recc_predicted@items[[1]] #ilk kullanici icin oneri
+movies_user_1 <- recc_predicted@itemLabels[recc_user_1]
+movies_user_2 <- movies_user_1
+for (i in 1:10){
+  movies_user_2[i] <- as.character(subset(movies, 
+                                         movies$movieId == movies_user_1[i])$title)
+}
+movies_user_2
+```
+
+Her kullanici icin onerileri iceren bir matris tanimlamak da mumkundur. Ilk dort kullanici icin oneriler gorsellestirilir:
+
+```{r recc_matrix,message=FALSE,warning=FALSE}
+recc_matrix <- sapply(recc_predicted@items, 
+                      function(x){ as.integer(colnames(ratings_movies)[x]) }) # her kullanici icin onerileri iceren matris
+
+recc_matrix[,1:4]
+```
+
+Burada, sutunlar ilk 4 kullaniciyi, satirlar onerilen 10 filmin *movieId* degerlerini ifade eder.
+
+En cok tavsiye edilen filmler belirlenir
+
+```{r most_recom_moviesIBCF,message=FALSE,warning=FALSE}
+number_of_items <- factor(table(recc_matrix))
+
+chart_title <- "IBCF Icin Oge Sayisinin Dagilimi"
+qplot(number_of_items) + ggtitle(chart_title)
+
+number_of_items_sorted <- sort(number_of_items, decreasing = TRUE)
+number_of_items_top <- head(number_of_items_sorted, n = 4)
+table_top <- data.frame(as.integer(names(number_of_items_top)),
+                       number_of_items_top)
+
+for (i in 1:4){
+  table_top[i,1] <- as.character(subset(movies, 
+                                         movies$movieId == table_top[i,1])$title)
+}
+
+colnames(table_top) <- c("Movie title", "No of items")
+head(table_top)
+```
+
+Filmlerin cogu sadece birkac kez tavsiye edilmistir ve birkac film 5 kereden fazla tavsiye edilmistir.
+
+IBCF benzerlik matrisi bazinda urun onerir. Her oge icin, model k-en cok benzerini depolar.
+
+##UBCF Tabanli Isbirlikci Filtreleme Modeli 
+
+Her yeni kullanici icin adimlar:
+
+1. Her kullanicinin yenisine ne kadar benzedigi olculur. IBCF gibi populer benzerlik olculeri korelasyon ve kosinustur.
+2. En benzer kullanici belirlenir. Secenekler :
+
+    * En iyi k kullanicilari dikkate alinir (k-nearest_neighbors)
+    * Benzerligi tanimlanmis bir esigin uzerinde olan kullanicilar dikkate alinir
+   
+3. Benzer kullanicilar tarafindan en cok derecelendirilen filmler derecelendirilir. Bu derecelendirme benzer kullanicilar arasindaki ortalama derecenlendirmedir ve yaklasimlari :  
+
+   * Ortalama puani
+   * Agirliklarla benzerlikleri kullanarak agirlikli ortalama degerlendirmedir.
+   
+4. En cok oy alan filmler secilir
+
+##Oneri Sistemi Olusturma:
+
+UBCF modelin varsayilan parametreleri kontrol edilir. Burada *nn* bir dizi benzer kullanicidir ve *method* olarak *cosine* benzerlik islevi kullanilir. Parametreler varsayilan degerlerine birakilarak ve train seti kullanilarak tavsiye modeli olusturulur.
+
+```{r build_UBCF,message=FALSE,warning=FALSE}
+recommender_models <- recommenderRegistry$get_entries(dataType ="realRatingMatrix")
+recommender_models$UBCF_realRatingMatrix$parameters
+recc_model <- Recommender(data = recc_data_train, method = "UBCF")
+recc_model
+model_details <- getModel(recc_model)
+#names(model_details)
+model_details$data
+```
+
+##Tavsiye Modelini Test Setine Uygulamak
+
+IBCF ile aynidir. Test setindeki her yeni kullanici icin 10 tavsiye belirlenir. 
+
+```{r apply_UBCF,message=FALSE,warning=FALSE}
+n_recommended <- 10
+recc_predicted <- predict(object = recc_model,
+                          newdata = recc_data_test, 
+                          n = n_recommended) 
+recc_predicted
+```
+
+**Sonuclar**
+
+Ilk 4 kullaniciya bakilir:
+
+```{r explore_UBCF,message=FALSE,warning=FALSE}
+recc_matrix <- sapply(recc_predicted@items, 
+                      function(x){ as.integer(colnames(ratings_movies)[x]) })
+#dim(recc_matrix)
+recc_matrix[, 1:4]
+```
+
+Bu matris ilk 4 kullanici icin her filmin *movieId*sini verir.
+
+Her filmin kac kez onerildigine bakilir ve histogrami cizilir.
+
+```{r times_per_movie,message=FALSE,warning=FALSE}
+number_of_items <- factor(table(recc_matrix))
+
+chart_title <- "UBCF Icin Oge Sayisinin Dagilimi"
+qplot(number_of_items) + ggtitle(chart_title)
+```
+
+
+IBCF ile karsilastirildiginda, dagilim daha uzun bir kuyruga sahiptir. Bu, digerlerinden daha sik onerilen bazi filmler oldugu anlamina gelir. 
+
+En iyi basliklara bakmak:
+
+```{r top_titles_UBCF,message=FALSE,warning=FALSE}
+number_of_items_sorted <- sort(number_of_items, decreasing = TRUE)
+number_of_items_top <- head(number_of_items_sorted, n = 4)
+table_top <- data.frame(as.integer(names(number_of_items_top)), number_of_items_top)
+
+for (i in 1:4){
+  table_top[i,1] <- as.character(subset(movies, 
+                                         movies$movieId == table_top[i,1])$title)
+}
+colnames(table_top) <- c("Movie title", "No of items")
+head(table_top)
+```
+
+UBCF'nin sonuclarini IBCF ile karsilastirmak, farkli algoritmalar hakkinda bazi yararli bilgiler bulunmasina yardimci olur. UBCF'nin ilk verilere erismesi gerekir. Tum veritabanini bellekte tutmasi gerektiginden, buyuk bir derecelendirme matrisinin varliginda iyi calismaz. Ayrica, benzerlik matrisini olusturmak cok fazla bilgi islem gucu ve zaman gerektirir.
+
+Bununla birlikte, UBCF'nin dogrulugunun IBCF'den biraz daha dogru oldugu kanitlanmistir. Bu nedenle veri kumesi cok buyuk degilse iyi bir secenektir.
+
+##Tavsiye Sistemlerini Degerlendirme
+
+Bir oneri motoru olusturmaya karar verirken secim yapilabilecek birkac secenek vardir. Performanslari karsilastirmak ve en uygun modeli secmek icin su adimlar takip edilir:
+
+* Performansi degerlendirmek icin verileri hazirlamak
+* Bazi modellerin performanslarini degerlendirmek
+* En iyi performans gosteren modelleri secmek
+* Model parametrelerini optimize etmek
+
+**Veriler Modellerin Degerlendirilmesi icin Hazirlanir**
+
+Modeli degerlendirmek icin iki train ve test verisine ihtiyac vardir. Bunlari olusturmak icin birkac yontem vardir:
+
+1) verileri train ve test setlerine bolme
+
+2) onyukleme (Bootrstrapping)
+
+3) k-katlama.
+
+##Verileri Bolme
+
+Verilerin train ve test setlerine bolunmesi genellikle 80/20 orani kullanilarak yapilir.
+
+```{r eval_split,message=FALSE,warning=FALSE}
+percentage_training <- 0.8
+```
+
+Test setindeki her kullanici icin, oneriler olusturmak uzere kac oge kullanilacagi tanimlanmasi gerekir. Bunun icin, test edilecek hicbir ogeye sahip kullanici olmayacagindan emin olmak icin once kullanicilar tarafindan derecelendirilen minimum oge sayisi kontrol edilir.
+
+```{r split_parameters, message=FALSE, warning=FALSE}
+min(rowCounts(ratings_movies)) 
+items_to_keep <- 5 #tavsiye edilecek oge sayisi
+rating_threshold <- 3 # iyi kabul edilen minimum derecelendirmeye sahip esik
+n_eval <- 1 #degerlendirme kac kez yapilir
+
+eval_sets <- evaluationScheme(data = ratings_movies, 
+                              method = "split",
+                              train = percentage_training, 
+                              given = items_to_keep, 
+                              goodRating = rating_threshold, 
+                              k = n_eval) 
+eval_sets
+
+getData(eval_sets, "train") # training set
+getData(eval_sets, "known") # onerileri olusturmak icin kullanilan ogelerle ayarlama
+getData(eval_sets, "unknown") # onerileri test etmek icin kullanilan ogelerle ayarlanir
+
+qplot(rowCounts(getData(eval_sets, "unknown"))) + 
+  geom_histogram(binwidth = 10) + 
+  ggtitle("Kullanicilar Tarafindan Bilinmeyen Ogeler")
+```
+
+Kullanicilar tarafindan bilinmeyen ogeler cok degiskenlik gostermektedir.
+
+##Verileri Onyukleme (Bootrstrapping)
+
+Bootrstrapping, verileri bolmek icin baska bir yaklasimdir. Ayni kullanici bir kereden fazla orneklenebilir ve eger train seti daha oncekiyle ayni boyuta sahipse, test setinde daha fazla kullanici olacaktir.
+
+```{r bootstrap, message=FALSE, warning=FALSE}
+eval_sets <- evaluationScheme(data = ratings_movies, 
+                              method = "bootstrap", 
+                              train = percentage_training, 
+                              given = items_to_keep,
+                              goodRating = rating_threshold, 
+                              k = n_eval)
+
+table_train <- table(eval_sets@runsTrain[[1]])
+n_repetitions <- factor(as.vector(table_train))
+qplot(n_repetitions) + 
+  ggtitle("Train Setindeki Tekrar Sayisi")
+```
+
+Grafikte kullanicilarin cogunun dort kereden daha az orneklendigi gosterilmistir.
+
+##Modelleri Dogrulamak Icin Capraz Dogrulama Kullanma
+
+Hesaplama acisindan daha agir olmasina ragmen, k-kat capraz gecerlilik yaklasimi en dogru yaklasimdir. 
+
+Bu yaklasim kullanilararak, veriler bazi parcalara ayrilir, test seti olarak bir parca cikarilir ve dogrulugu degerlendirilir. Ardindan, birbiriyle ortalama dogruluk hesaplanabilir.
+
+```{r k-fold, message=FALSE, warning=FALSE}
+n_fold <- 4
+eval_sets <- evaluationScheme(data = ratings_movies, 
+                              method = "cross-validation",
+                              k = n_fold, 
+                              given = items_to_keep, 
+                              goodRating = rating_threshold)
+size_sets <- sapply(eval_sets@runsTrain, length)
+size_sets
+```
+
+4-kat yaklasim kullanilarak, ayni boyutta 315 dort set olsun.
+
+##Derecelendirmeleri Degerlendirme
+
+Degerlendirme icin k-katlama yaklasimi kullanilir. 
+
+Ilk olarak, degerlendirme setleri yeniden tanimlanir, IBCF modelini olusturulur ve tahmin edilen derecelendirmelerle bir matris olusturulur.
+
+```{r eval_ratings, message=FALSE, warning=FALSE}
+eval_sets <- evaluationScheme(data = ratings_movies, 
+                              method = "cross-validation",
+                              k = n_fold, 
+                              given = items_to_keep, 
+                              goodRating = rating_threshold)
+
+model_to_evaluate <- "IBCF"
+model_parameters <- NULL
+
+eval_recommender <- Recommender(data = getData(eval_sets, "train"),
+                                method = model_to_evaluate, 
+                                parameter = model_parameters)
+
+items_to_recommend <- 10
+eval_prediction <- predict(object = eval_recommender, 
+                           newdata = getData(eval_sets, "known"), 
+                           n = items_to_recommend, 
+                           type = "ratings")
+
+qplot(rowCounts(eval_prediction)) + 
+  geom_histogram(binwidth = 10) +
+  ggtitle("Filmlerin Kullanici Basina Dagilimi")
+```
+
+Yukaridaki goruntu, tahmin edilen derecelendirmeler matrisinde filmlerin kullanici basina dagilimini gostermektedir.
+
+Her kullanici icin dogruluk olcumleri hesaplanir. RMSE'lerin cogu (Kok ortalama kare hatalari) 0,5 ile 1,8 araligindadir:
+
+```{r acc, message=FALSE,  warning=FALSE, echo=FALSE}
+eval_accuracy <- calcPredictionAccuracy(x = eval_prediction, 
+                                        data = getData(eval_sets, "unknown"), 
+                                        byUser = TRUE)
+head(eval_accuracy)
+
+qplot(eval_accuracy[, "RMSE"]) + 
+  geom_histogram(binwidth = 0.1) +
+  ggtitle("RMSE'nin Kullaniciya Gore Dagilimi")
+```
+
+Tum model icin bir performans indeksine sahip olmak amaciyla, *byUser* ogesi FALSE olarak belirlenir ve ortalama indeksler hesaplanir:
+
+```{r acc_IBCF, message=FALSE,  warning=FALSE, echo=FALSE}
+eval_accuracy <- calcPredictionAccuracy(x = eval_prediction, 
+                                        data = getData(eval_sets, "unknown"), 
+                                        byUser = FALSE) 
+eval_accuracy
+```
+
+Dogruluk olcutleri, ayni verilerin farkli modellerinin performansini karsilastirmak icin yararlidir.
+
+**Onerilerin Degerlendirilmesi**
+
+Dogrulugu olcmenin bir baska yolu, onerileri olumlu bir derecelendirmeye sahip satin alimlarla karsilastirmaktir. Bunun icin, *recommenderlab * kutuphanesinde onceden olusturulmus *evaluate* islevi kullanilabilir.
+Bu islev, her kullaniciya onerilecek ogelerin *n* sayisina bagli olarak onerici performansini degerlendirir. *n* dizisi n = seq (10, 100, 10) olarak kullanildi. Ortaya cikan performans matrisinin ilk satirlari asagida sunulmustur:
+
+```{r eval_recomms, message=FALSE, warning=FALSE}
+results <- evaluate(x = eval_sets, 
+                    method = model_to_evaluate, 
+                    n = seq(10, 100, 10))
+
+head(getConfusionMatrix(results)[[1]])
+```
+
+Tum bolmelere ayni anda bir goz atmak icin TP, FP, FN ve TN sutunlarinin endeksleri ozetlenir:
+
+*[Bu terimlerin aciklamasi](https://medium.com/@sengul_krdrl/hata-matrisini-anlamak-7035b7921c0f)*
+
+```{r conf_matrix_whole, message=FALSE, warning=FALSE}
+columns_to_sum <- c("TP", "FP", "FN", "TN")
+indices_summed <- Reduce("+", getConfusionMatrix(results))[, columns_to_sum]
+head(indices_summed)
+```
+
+Son olarak, ROC ve Precision-recall egrileri cizdirilir:
+
+```{r roc, message=FALSE, warning=FALSE}
+plot(results, annotate = TRUE, main = "ROC curve")
+
+plot(results, "prec/rec", annotate = TRUE, main = "Precision-recall")
+```
+
+Derecelendirilmis filmlerin kucuk bir yuzdesi onerilirse, hassasiyet azalir. Bu sebeple derecelendirilen filmlerin daha yuksek yuzdesinin onerilmesi tavsiye edilir.
+
+##Modelleri Karsilastirma
+
+Farkli modelleri karsilastirmak icin asagidaki tanimlamalar yapilir ve adimlar izlenir : 
+
+* Cosine'i mesafe fonksiyonu olarak kullanan oge tabanli ortak filtreleme
+
+* Mesafe korelasyonu olarak Pearson korelasyonunu kullanarak madde bazli isbirlikci filtreleme
+
+* Cosine'i mesafe fonksiyonu olarak kullanan kullanici tabanli ortak filtreleme
+
+* Pearson korelasyonunu uzaklik fonksiyonu olarak kullanan kullanici tabanli ortak filtreleme
+
+* Bir taban cizgisi olmasi icin rastgele oneriler
+
+```{r define_diff_models,message=FALSE,warning=FALSE}
+models_to_evaluate <- list(
+IBCF_cos = list(name = "IBCF", 
+                param = list(method = "cosine")),
+IBCF_cor = list(name = "IBCF", 
+                param = list(method = "pearson")),
+UBCF_cos = list(name = "UBCF", 
+                param = list(method = "cosine")),
+UBCF_cor = list(name = "UBCF", 
+                param = list(method = "pearson")),
+random = list(name = "RANDOM", param=NULL)
+)
+```
+
+Onerilen filmler icin (n_recommendations <- c(1, 5, seq(10, 100, 10))) sayi kumesi tanimlanir. 
+
+```{r params,message=FALSE,warning=FALSE}
+n_recommendations <- c(1, 5, seq(10, 100, 10))
+list_results <- evaluate(x = eval_sets, 
+                         method = models_to_evaluate, 
+                         n = n_recommendations)
+
+sapply(list_results, class) == "evaluationResults"
+```
+
+Asagidaki tabloda ornek olarak Kosinus mesafeli IBCF icin performans degerlendirme matrisinin ilk satirlari gosterilmektedir:
+
+```{r ex_compare,message=FALSE,warning=FALSE}
+avg_matrices <- lapply(list_results, avg)
+head(avg_matrices$IBCF_cos[, 5:8])
+```
+
+##En Uygun Modeli Belirleme
+
+Modeller ROC egrileri ve Precision-recall egrilerini gosteren bir grafik olusturularak karsilastirilir.
+
+```{r compare_models_roc, message=FALSE, warning=FALSE}
+plot(list_results, annotate = 1, legend = "topleft") 
+title("ROC curve")
+
+plot(list_results, "prec/rec", annotate = 1, legend = "bottomright")
+title("Precision-recall")
+```
+
+Iyi bir performans indeksi egrinin altindaki alandir (AUC), yani ROC egrisinin altindaki alandir. Hesaplamadan bile, grafik en yuksegin kosinus mesafesi olan UBCF oldugunu gosterir, bu yuzden en iyi performans gosteren tekniktir.
+
+Kosinus mesafeli UBCF en iyi modeldir. Sistemin ana amacinin ne olduguna bagli olarak, tavsiye edilecek uygun sayida oge tanimlanmalidir.
+
+##Sayisal Parametreyi Optimize Etmek
+
+IBCF en yakin k ogelerini dikkate alir. Bu parametreyi ayarlamak icin 5 ila 40 arasinda daha fazla deger kesfedilir:
+
+```{r optimize, message=FALSE, warning=FALSE}
+vector_k <- c(5, 10, 20, 30, 40)
+models_to_evaluate <- lapply(vector_k, function(k){
+  list(name = "IBCF",
+       param = list(method = "cosine", k = k))
+})
+names(models_to_evaluate) <- paste0("IBCF_k_", vector_k)
+```
+
+Burada ayni IBCF / kosinus modelleri k-en yakin ogelerin farkli degerleriyle olusturulup degerlendirilir:
+
+```{r eval_optimized, message=FALSE, warning=FALSE}
+plot(list_results, annotate = 1, legend = "topleft") 
+title("ROC curve")
+
+plot(list_results, "prec/rec", annotate = 1, legend = "bottomright")
+title("Precision-recall")
+```
+
+ROC egrisinin grafigine dayanarak, en buyuk AUC degerine sahip k 10'dur. Baska bir iyi aday 5'tir, fakat asla yuksek bir TPR'ye sahip olamaz. Bu, cok yuksek bir n degeri ayarlansa bile, algoritmanin kullanicinin sevdigi ogelerin buyuk bir yuzdesini oneremeyecegi anlamina gelir. K = 5 olan IBCF, satin alma islemlerine benzer yani bu veri icin daha once izlenilmis filmlere benzer birkac ogeyi onerir. Bu nedenle, bircok ogeyi onermek icin kullanilamaz.
+
+Precision-recall grafigine dayanarak, en yuksek tutarlilikta geri donus elde etmek icin k degeri 10 olarak ayarlanmalidir. 
+
+##UBCF Modelini Gosteren Cevrimici ShinyApp Uygulamasi
+
+R'deki Shiny paketini kullanilarak tavsiye sistemi icin bir web uygulamasi olusturuldu.Bu web uygulamasinda, *kullanici tabanli isbirlikci yaklasim* tarafindan olusturulan tavsiye sistemi sunuldu. Bu yaklasim, bu proje icin yapilan degerlendirmeye dayanarak en iyi performans gosteren yontem *kullanici tabanli isbirlikci yaklasim* oldugu icin kullanilmistir.
+
+Web uygulamasina buradan ulasabilirsiniz. **[FilmOneriSistemi](https://filmonerisistemi-nisero.shinyapps.io/Film_Oneri_Sistemleri/?_ga=2.105718464.230254219.1593824124-369299993.1593824124)**
+
+
+##KAYNAKÇA :
+
+* **(https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html)**
+
+* **(https://sifter.org/~simon/journal/20061211.html)**
+
+* **(https://rpubs.com/vsi/movielens)**
+
+* **(https://rpubs.com/jeknov/movieRec)**
+
+* **(https://data-flair.training/blogs/data-science-r-movie-recommendation/)**
+
+* **(http://rstudio-pubs-static.s3.amazonaws.com/248530_18970dc8eb4046a6b4f2fba987fe2a50.html)**
+
+* **(https://github.com/danmalter/Movielense)**
+
+**Shiny APP**
+
+* **[Shiny Uyelik](https://www.shinyapps.io/)**
+
+* **[Rstudio-Shiny](https://shiny.rstudio.com/)**
+
+
+##Projemiz Ile Ilgili Sorulacak Sorular 
+
+1.Oneri sistemimizde hangi filtreleme sistemini kullandik?Aciklayiniz?
+
+2.Benzerlik icin hangi methodlar kullanilabilir,bu projede hangi method kullanilmistir?
+
+3.Oneri sistemi modelini degerlerlendirmek icin kullanilan yontemler nelerdir?
+
+4.En iyi modeli bulmak icin hangi grafiksel yontem kullanilir ?
+
+5.Shiny app kullanicilar icin nasil acik hale getirilir?
+
+
